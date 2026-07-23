@@ -952,11 +952,34 @@ function stripHtml(h){const d=document.createElement("div");d.innerHTML=h;return
    DRAWING CANVAS  (pen draws / finger navigates by default)
    ============================================================ */
 const canvas=el("canvas");
-const ctx=canvas.getContext("2d");
+// desynchronized:true opts into the browser's low-latency canvas path, which is
+// designed for exactly this (stylus drawing) and measurably cuts pen-to-ink lag.
+const ctx=canvas.getContext("2d",{desynchronized:true});
 let tool="pen", penColor="#20242e", curPointer=null;
 let moveDist=0, lastX=0, lastY=0;
-let curStroke=null, curRaw=null; // stroke being drawn right now (vector points + raw device-px points for live smoothing)
-const DPR=()=>Math.max(1,window.devicePixelRatio||1);
+let curStroke=null, curRaw=null; // stroke being drawn right now (device-px pts for live smoothing + normalized pts for storage)
+let drawnSeg=0;                  // index of the next un-rendered segment in curRaw
+// Cap at 2: on a 3x tablet the scratch-sized canvas would otherwise be ~17M
+// pixels, which is slow to composite for no visible gain in ink crispness.
+const DPR=()=>Math.min(2,Math.max(1,window.devicePixelRatio||1));
+
+// Pen geometry (CSS px, scaled to device px at draw time).
+const PEN_MIN=0.5, PEN_RANGE=1.6, ERASER_W=18;
+// Segments whose widths differ by less than this can share one stroke() call.
+const WIDTH_BATCH_TOL=0.4;
+
+/* ---- cached canvas rect ----
+   pos() used to call getBoundingClientRect() per point. With coalesced events
+   that's 10-20 forced layout reads per frame, which is what makes the ink trail
+   behind the pen. The rect only changes on scroll/resize/layout, so we cache it
+   and refresh it on exactly those events instead. */
+let rectCache=null, scaleX=1, scaleY=1;
+function refreshRect(){
+  const r=canvas.getBoundingClientRect();
+  rectCache=r;
+  scaleX = r.width>0 ? canvas.width/r.width : 1;
+  scaleY = r.height>0 ? canvas.height/r.height : 1;
+}
 
 // The canvas backing store is sized in device pixels for crispness, but we draw
 // directly in that same device-pixel space (identity transform) and derive the
@@ -981,11 +1004,15 @@ function resizeCanvas(preserve=true){
   canvas.height=Math.max(1,Math.round(cssH*dpr));
   ctx.setTransform(1,0,0,1,0,0);
   ctx.lineCap="round"; ctx.lineJoin="round";
+  refreshRect();
   // ink is vector data (see below), so redrawing after a resize is just a cheap
   // replay at the new size — no distortion, and no raster snapshot to grab.
   if(preserve && session) replayStrokes(strokesFor(curQ().id));
 }
 window.addEventListener("resize",()=>{clearTimeout(window._rz);window._rz=setTimeout(()=>resizeCanvas(true),120);});
+// Scrolling moves the canvas within the viewport, so the cached rect must go
+// stale; null means "recompute on next use" (one read, not one per point).
+el("scroll-inner").addEventListener("scroll",()=>{rectCache=null;},{passive:true});
 
 /* ---- ink is stored as vector strokes, not canvas snapshots ----
    Each stroke is {tool, color, points:[[nx,ny,nw],...]} with nx/ny/nw
@@ -998,6 +1025,35 @@ window.addEventListener("resize",()=>{clearTimeout(window._rz);window._rz=setTim
    far, not to the canvas's pixel count. */
 function strokesFor(qid){ return (session.strokes[qid]=session.strokes[qid]||[]); }
 
+/* Renders segments [from, to) of a device-px point list {x,y,w}, chaining as
+   many as possible into a single path so we issue one stroke() per run of
+   similar-width segments instead of one per point. Consecutive midpoint
+   quadratics share an endpoint, so they chain exactly with no visible seam. */
+function renderSegments(pts,from,to){
+  if(pts.length<2) return;
+  let i=from;
+  if(i<=1){ // first segment is a plain line p0->p1
+    ctx.lineWidth=pts[1].w; ctx.beginPath();
+    ctx.moveTo(pts[0].x,pts[0].y); ctx.lineTo(pts[1].x,pts[1].y); ctx.stroke();
+    i=2;
+  }
+  while(i<to){
+    const w=pts[i].w;
+    ctx.lineWidth=w; ctx.beginPath();
+    const p1=pts[i-2],p2=pts[i-1],p3=pts[i];
+    ctx.moveTo((p1.x+p2.x)/2,(p1.y+p2.y)/2);
+    ctx.quadraticCurveTo(p2.x,p2.y,(p2.x+p3.x)/2,(p2.y+p3.y)/2);
+    let j=i+1;
+    while(j<to && Math.abs(pts[j].w-w)<WIDTH_BATCH_TOL){
+      const q2=pts[j-1],q3=pts[j];
+      ctx.quadraticCurveTo(q2.x,q2.y,(q2.x+q3.x)/2,(q2.y+q3.y)/2);
+      j++;
+    }
+    ctx.stroke();
+    i=j;
+  }
+}
+
 function replayStrokes(list){
   ctx.clearRect(0,0,canvas.width,canvas.height);
   (list||[]).forEach(s=>{
@@ -1006,35 +1062,10 @@ function replayStrokes(list){
     ctx.strokeStyle=s.color; ctx.fillStyle=s.color;
     const pts=s.points.map(([nx,ny,nw])=>({x:nx*canvas.width,y:ny*canvas.height,w:nw*canvas.width}));
     if(pts.length===1){ drawDot(pts[0].x,pts[0].y,pts[0].w); return; }
-    for(let i=1;i<pts.length;i++){
-      ctx.lineWidth=pts[i].w;
-      if(i<2){ ctx.beginPath(); ctx.moveTo(pts[0].x,pts[0].y); ctx.lineTo(pts[1].x,pts[1].y); ctx.stroke(); }
-      else{
-        const p1=pts[i-2],p2=pts[i-1],p3=pts[i];
-        const m1={x:(p1.x+p2.x)/2,y:(p1.y+p2.y)/2}, m2={x:(p2.x+p3.x)/2,y:(p2.y+p3.y)/2};
-        ctx.beginPath(); ctx.moveTo(m1.x,m1.y); ctx.quadraticCurveTo(p2.x,p2.y,m2.x,m2.y); ctx.stroke();
-      }
-    }
+    renderSegments(pts,0,pts.length);
   });
 }
 function drawDot(x,y,w){ ctx.beginPath(); ctx.arc(x,y,Math.max(w/2,.5),0,Math.PI*2); ctx.fill(); }
-
-// Draws one incoming point live using the same midpoint-quadratic smoothing
-// as replay (a small curve through the last 3 raw points rather than a
-// straight segment), which is what keeps fast strokes looking smooth instead
-// of faceted, and appends it to the stroke being recorded for persistence.
-function drawPoint(px,py,w){
-  curRaw.push({x:px,y:py});
-  const n=curRaw.length;
-  ctx.lineWidth=w;
-  if(n<3){ ctx.lineTo(px,py); ctx.stroke(); }
-  else{
-    const p1=curRaw[n-3], p2=curRaw[n-2], p3=curRaw[n-1];
-    const m1={x:(p1.x+p2.x)/2,y:(p1.y+p2.y)/2}, m2={x:(p2.x+p3.x)/2,y:(p2.y+p3.y)/2};
-    ctx.beginPath(); ctx.moveTo(m1.x,m1.y); ctx.quadraticCurveTo(p2.x,p2.y,m2.x,m2.y); ctx.stroke();
-  }
-  lastX=px; lastY=py;
-}
 
 canvas.addEventListener("pointerdown",e=>{
   const draw = e.pointerType==="pen" || settings.fingerDraws;
@@ -1042,6 +1073,7 @@ canvas.addEventListener("pointerdown",e=>{
     curPointer={id:e.pointerId,draw:false,sx:e.clientX,sy:e.clientY,ly:e.clientY,moved:false}; return;
   }
   e.preventDefault();
+  refreshRect();               // one layout read per stroke, not per point
   const p0=pos(e);
   curPointer={id:e.pointerId,draw:true,sx:e.clientX,sy:e.clientY,scale:p0.scale};
   canvas.setPointerCapture(e.pointerId);
@@ -1049,10 +1081,10 @@ canvas.addEventListener("pointerdown",e=>{
   lastX=p0.x; lastY=p0.y;
   ctx.globalCompositeOperation = tool==="eraser"?"destination-out":"source-over";
   ctx.strokeStyle=penColor; ctx.fillStyle=penColor;
-  const w0 = tool==="eraser"? 18*p0.scale : penWidth(e,p0.scale);
-  curRaw=[{x:p0.x,y:p0.y}];
+  const w0 = tool==="eraser"? ERASER_W*p0.scale : penWidth(e,p0.scale);
+  curRaw=[{x:p0.x,y:p0.y,w:w0}];
+  drawnSeg=0;
   curStroke={ tool, color:penColor, points:[[p0.x/canvas.width, p0.y/canvas.height, w0/canvas.width]] };
-  ctx.beginPath(); ctx.moveTo(lastX,lastY);
 });
 canvas.addEventListener("pointermove",e=>{
   if(!curPointer||e.pointerId!==curPointer.id)return;
@@ -1071,10 +1103,14 @@ canvas.addEventListener("pointermove",e=>{
   for(const ev of events){
     const p=pos(ev);
     moveDist+=Math.hypot(p.x-lastX,p.y-lastY);
-    const w = tool==="eraser"? 18*p.scale : penWidth(ev,p.scale);
-    drawPoint(p.x,p.y,w);
+    lastX=p.x; lastY=p.y;
+    const w = tool==="eraser"? ERASER_W*p.scale : penWidth(ev,p.scale);
+    curRaw.push({x:p.x,y:p.y,w});
     curStroke.points.push([p.x/canvas.width, p.y/canvas.height, w/canvas.width]);
   }
+  // render the whole batch at once (one stroke() per width-run, not per point)
+  renderSegments(curRaw,drawnSeg,curRaw.length);
+  drawnSeg=curRaw.length;
 });
 function endStroke(e){
   if(!curPointer||e.pointerId!==curPointer.id)return;
@@ -1087,9 +1123,11 @@ function endStroke(e){
       replayStrokes(strokesFor(qid));
       forwardTap(cp.sx,cp.sy);
     } else if(curStroke && curStroke.points.length){
+      // a committed single-point stroke draws as a dot (renderSegments needs 2+)
+      if(curRaw && curRaw.length===1) drawDot(curRaw[0].x,curRaw[0].y,curRaw[0].w);
       strokesFor(qid).push(curStroke);
     }
-    curStroke=null; curRaw=null;
+    curStroke=null; curRaw=null; drawnSeg=0;
   } else {
     // navigate-mode: a tap (not a scroll) forwards to the UI underneath
     if(!cp.moved && Math.hypot(e.clientX-cp.sx,e.clientY-cp.sy)<14) forwardTap(cp.sx,cp.sy);
@@ -1098,16 +1136,23 @@ function endStroke(e){
 canvas.addEventListener("pointerup",endStroke);
 canvas.addEventListener("pointercancel",endStroke);
 
-// Maps a pointer event to canvas device-pixel coordinates using the CURRENT
-// measured ratio between the backing store and the rendered box — not a cached
-// dpr — so position stays exact everywhere on the pane, however it was sized.
+// Maps a pointer event to canvas device-pixel coordinates using the measured
+// ratio between the backing store and the rendered box (kept in sync by
+// refreshRect on scroll/resize), so position stays exact everywhere on the pane
+// without paying for a layout read on every single point.
 function pos(e){
-  const r=canvas.getBoundingClientRect();
-  const sx = r.width>0 ? canvas.width/r.width : 1;
-  const sy = r.height>0 ? canvas.height/r.height : 1;
-  return { x:(e.clientX-r.left)*sx, y:(e.clientY-r.top)*sy, scale:(sx+sy)/2 };
+  if(!rectCache) refreshRect();
+  const r=rectCache;
+  return { x:(e.clientX-r.left)*scaleX, y:(e.clientY-r.top)*scaleY, scale:(scaleX+scaleY)/2 };
 }
-function penWidth(e,scale){ const pr=e.pressure&&e.pressure>0?e.pressure:.5; return (1 + pr*3.2)*scale; }
+// Width is quantized to 0.5px steps so that consecutive points under similar
+// pressure share an identical width and can be chained into one stroke() call.
+// At these pen sizes the stepping is invisible, but it turns a per-point
+// stroke() into a per-width-run one.
+function penWidth(e,scale){
+  const pr=e.pressure&&e.pressure>0?e.pressure:.5;
+  return Math.round((PEN_MIN + pr*PEN_RANGE)*scale*2)/2;
+}
 
 function forwardTap(cx,cy){
   canvas.style.pointerEvents="none";
