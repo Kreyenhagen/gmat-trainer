@@ -752,12 +752,11 @@ function setDifficulty(val){
 function renderCheckbar(){
   const bar=el("checkbar"); if(!bar)return;
   bar.innerHTML="";
-  const q=curQ();
-  const btn=document.createElement("button");
-  btn.className="btn primary"; btn.textContent="Check answer";
+  updateCheckBtn();
+}
+function updateCheckBtn(){
+  const btn=el("check-btn"); if(!btn)return;
   btn.disabled=!selected; btn.style.opacity=selected?1:.5;
-  btn.onclick=checkAnswer;
-  bar.appendChild(btn);
 }
 
 function checkAnswer(){
