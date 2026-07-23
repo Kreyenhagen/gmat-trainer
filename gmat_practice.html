@@ -675,13 +675,12 @@ function shuffle(a){for(let i=a.length-1;i>0;i--){const j=Math.random()*(i+1)|0;
    SESSION / PRACTICE
    ============================================================ */
 function startSession(ids){
-  session={ids:ids.slice(),idx:0,first:{},hintUsed:{},chats:{},drawings:{}};
+  session={ids:ids.slice(),idx:0,first:{},hintUsed:{},chats:{},strokes:{}};
   el("home").classList.add("hidden");
   el("practice").classList.remove("hidden");
   loadQuestion();
 }
 function endToHome(){
-  saveCurrentDrawing();
   el("practice").classList.add("hidden");
   el("home").classList.remove("hidden");
   renderHome();
@@ -808,13 +807,12 @@ function recordResult(qid,correct){
 
 /* nav */
 el("next-q").onclick=()=>{
-  saveCurrentDrawing();
   if(session.idx===session.ids.length-1){ finishSession(); return; }
   session.idx++; loadQuestion();
 };
 el("prev-q").onclick=()=>{
   if(session.idx===0)return;
-  saveCurrentDrawing(); session.idx--; loadQuestion();
+  session.idx--; loadQuestion();
 };
 el("check-btn").onclick=()=>{ if(selected) checkAnswer(); };
 
@@ -955,8 +953,9 @@ function stripHtml(h){const d=document.createElement("div");d.innerHTML=h;return
    ============================================================ */
 const canvas=el("canvas");
 const ctx=canvas.getContext("2d");
-let tool="pen", penColor="#20242e", drawing=false, curPointer=null;
-let moveDist=0, lastX=0, lastY=0, undoStack=[];
+let tool="pen", penColor="#20242e", curPointer=null;
+let moveDist=0, lastX=0, lastY=0;
+let curStroke=null, curRaw=null; // stroke being drawn right now (vector points + raw device-px points for live smoothing)
 const DPR=()=>Math.max(1,window.devicePixelRatio||1);
 
 // The canvas backing store is sized in device pixels for crispness, but we draw
@@ -977,19 +976,65 @@ function resizeCanvas(preserve=true){
   const dpr=DPR();
   const cssW=paneRect.width;
   const cssH=Math.max(qc.scrollHeight,paneRect.height) + paneRect.height*SCRATCH_EXTRA_PANES;
-  const data=(preserve&&canvas.width && cssW>0)?canvas.toDataURL():null;
   canvas.style.width=cssW+"px"; canvas.style.height=cssH+"px";
   canvas.width=Math.max(1,Math.round(cssW*dpr));
   canvas.height=Math.max(1,Math.round(cssH*dpr));
   ctx.setTransform(1,0,0,1,0,0);
   ctx.lineCap="round"; ctx.lineJoin="round";
-  if(data){ const img=new Image(); img.onload=()=>ctx.drawImage(img,0,0,canvas.width,canvas.height); img.src=data; }
+  // ink is vector data (see below), so redrawing after a resize is just a cheap
+  // replay at the new size — no distortion, and no raster snapshot to grab.
+  if(preserve && session) replayStrokes(strokesFor(curQ().id));
 }
 window.addEventListener("resize",()=>{clearTimeout(window._rz);window._rz=setTimeout(()=>resizeCanvas(true),120);});
 
-function pushUndo(){ try{undoStack.push(ctx.getImageData(0,0,canvas.width,canvas.height)); if(undoStack.length>15)undoStack.shift();}catch(e){} }
+/* ---- ink is stored as vector strokes, not canvas snapshots ----
+   Each stroke is {tool, color, points:[[nx,ny,nw],...]} with nx/ny/nw
+   normalized to the canvas's current width/height so it redraws crisply at
+   any size. This replaces the old approach of snapshotting the entire canvas
+   bitmap on every stroke (getImageData/putImageData), which — once the canvas
+   became tall enough to hold scratch space — was slow enough to cause a
+   stutter every time you touched the pen down. Undo/clear/resize now just
+   replay the stroke list, which costs time proportional to the ink drawn so
+   far, not to the canvas's pixel count. */
+function strokesFor(qid){ return (session.strokes[qid]=session.strokes[qid]||[]); }
 
-function shouldDraw(e){ return e.pointerType==="pen" || settings.fingerDraws || tool==="eraser"&&settings.fingerDraws; }
+function replayStrokes(list){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  (list||[]).forEach(s=>{
+    if(!s.points||!s.points.length) return;
+    ctx.globalCompositeOperation = s.tool==="eraser" ? "destination-out" : "source-over";
+    ctx.strokeStyle=s.color; ctx.fillStyle=s.color;
+    const pts=s.points.map(([nx,ny,nw])=>({x:nx*canvas.width,y:ny*canvas.height,w:nw*canvas.width}));
+    if(pts.length===1){ drawDot(pts[0].x,pts[0].y,pts[0].w); return; }
+    for(let i=1;i<pts.length;i++){
+      ctx.lineWidth=pts[i].w;
+      if(i<2){ ctx.beginPath(); ctx.moveTo(pts[0].x,pts[0].y); ctx.lineTo(pts[1].x,pts[1].y); ctx.stroke(); }
+      else{
+        const p1=pts[i-2],p2=pts[i-1],p3=pts[i];
+        const m1={x:(p1.x+p2.x)/2,y:(p1.y+p2.y)/2}, m2={x:(p2.x+p3.x)/2,y:(p2.y+p3.y)/2};
+        ctx.beginPath(); ctx.moveTo(m1.x,m1.y); ctx.quadraticCurveTo(p2.x,p2.y,m2.x,m2.y); ctx.stroke();
+      }
+    }
+  });
+}
+function drawDot(x,y,w){ ctx.beginPath(); ctx.arc(x,y,Math.max(w/2,.5),0,Math.PI*2); ctx.fill(); }
+
+// Draws one incoming point live using the same midpoint-quadratic smoothing
+// as replay (a small curve through the last 3 raw points rather than a
+// straight segment), which is what keeps fast strokes looking smooth instead
+// of faceted, and appends it to the stroke being recorded for persistence.
+function drawPoint(px,py,w){
+  curRaw.push({x:px,y:py});
+  const n=curRaw.length;
+  ctx.lineWidth=w;
+  if(n<3){ ctx.lineTo(px,py); ctx.stroke(); }
+  else{
+    const p1=curRaw[n-3], p2=curRaw[n-2], p3=curRaw[n-1];
+    const m1={x:(p1.x+p2.x)/2,y:(p1.y+p2.y)/2}, m2={x:(p2.x+p3.x)/2,y:(p2.y+p3.y)/2};
+    ctx.beginPath(); ctx.moveTo(m1.x,m1.y); ctx.quadraticCurveTo(p2.x,p2.y,m2.x,m2.y); ctx.stroke();
+  }
+  lastX=px; lastY=py;
+}
 
 canvas.addEventListener("pointerdown",e=>{
   const draw = e.pointerType==="pen" || settings.fingerDraws;
@@ -1000,11 +1045,13 @@ canvas.addEventListener("pointerdown",e=>{
   const p0=pos(e);
   curPointer={id:e.pointerId,draw:true,sx:e.clientX,sy:e.clientY,scale:p0.scale};
   canvas.setPointerCapture(e.pointerId);
-  pushUndo();
-  drawing=true; moveDist=0;
-  const p=p0; lastX=p.x; lastY=p.y;
+  moveDist=0;
+  lastX=p0.x; lastY=p0.y;
   ctx.globalCompositeOperation = tool==="eraser"?"destination-out":"source-over";
-  ctx.strokeStyle=penColor;
+  ctx.strokeStyle=penColor; ctx.fillStyle=penColor;
+  const w0 = tool==="eraser"? 18*p0.scale : penWidth(e,p0.scale);
+  curRaw=[{x:p0.x,y:p0.y}];
+  curStroke={ tool, color:penColor, points:[[p0.x/canvas.width, p0.y/canvas.height, w0/canvas.width]] };
   ctx.beginPath(); ctx.moveTo(lastX,lastY);
 });
 canvas.addEventListener("pointermove",e=>{
@@ -1016,25 +1063,33 @@ canvas.addEventListener("pointermove",e=>{
     return;
   }
   e.preventDefault();
-  const p=pos(e);
-  moveDist+=Math.hypot(p.x-lastX,p.y-lastY);
-  const w = tool==="eraser"? 18*p.scale : penWidth(e,p.scale);
-  ctx.lineWidth=w;
-  ctx.lineTo(p.x,p.y); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(p.x,p.y);
-  lastX=p.x; lastY=p.y;
+  // getCoalescedEvents exposes the pen's full native sample rate instead of
+  // just the (lower) rate the browser dispatches pointermove at — capturing
+  // those extra in-between points is what keeps fast strokes from looking
+  // faceted/angular.
+  const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+  for(const ev of events){
+    const p=pos(ev);
+    moveDist+=Math.hypot(p.x-lastX,p.y-lastY);
+    const w = tool==="eraser"? 18*p.scale : penWidth(ev,p.scale);
+    drawPoint(p.x,p.y,w);
+    curStroke.points.push([p.x/canvas.width, p.y/canvas.height, w/canvas.width]);
+  }
 });
 function endStroke(e){
   if(!curPointer||e.pointerId!==curPointer.id)return;
   const cp=curPointer; curPointer=null;
   if(cp.draw){
-    drawing=false;
     try{canvas.releasePointerCapture(e.pointerId);}catch(_){}
-    // treat a tiny pen mark as a tap → undo the dot and forward the tap to the UI
+    const qid=curQ().id;
+    // treat a tiny pen mark as a tap → discard it (redraw without it) and forward the tap to the UI
     if(e.pointerType==="pen" && moveDist<7*(cp.scale||1) && tool!=="eraser"){
-      if(undoStack.length){ ctx.putImageData(undoStack.pop(),0,0); }
+      replayStrokes(strokesFor(qid));
       forwardTap(cp.sx,cp.sy);
+    } else if(curStroke && curStroke.points.length){
+      strokesFor(qid).push(curStroke);
     }
+    curStroke=null; curRaw=null;
   } else {
     // navigate-mode: a tap (not a scroll) forwards to the UI underneath
     if(!cp.moved && Math.hypot(e.clientX-cp.sx,e.clientY-cp.sy)<14) forwardTap(cp.sx,cp.sy);
@@ -1076,8 +1131,13 @@ el("tools").addEventListener("click",e=>{
   }
   const t=b.dataset.tool;
   if(t==="pen"||t==="eraser"){ setTool(t); }
-  else if(t==="undo"){ if(undoStack.length) ctx.putImageData(undoStack.pop(),0,0); }
-  else if(t==="clear"){ pushUndo(); ctx.clearRect(0,0,canvas.width,canvas.height); }
+  else if(t==="undo"){
+    const list=strokesFor(curQ().id);
+    if(list.length){ list.pop(); replayStrokes(list); }
+  }
+  else if(t==="clear"){
+    session.strokes[curQ().id]=[]; ctx.clearRect(0,0,canvas.width,canvas.height);
+  }
   else if(t==="finger"){ settings.fingerDraws=!settings.fingerDraws; saveSettings(); updateFingerBtn(); }
 });
 function setTool(t){ tool=t;
@@ -1089,13 +1149,12 @@ function updateFingerBtn(){
   el("finger-lbl").innerHTML= settings.fingerDraws? "finger:<br>draws" : "finger:<br>navigate";
 }
 
-/* per-question drawing persistence (in-memory for the session) */
-function saveCurrentDrawing(){ if(!session||!curQ())return; try{session.drawings[curQ().id]=canvas.toDataURL();}catch(e){} }
+/* per-question drawing persistence: strokes are committed to session.strokes
+   as each one finishes (see endStroke), so there's nothing to explicitly save
+   when navigating away — restoreDrawing just replays the new question's list. */
 function restoreDrawing(){
-  undoStack=[];
-  ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,canvas.width,canvas.height);
-  const d=session.drawings[curQ().id];
-  if(d){ const img=new Image(); img.onload=()=>ctx.drawImage(img,0,0,canvas.width,canvas.height); img.src=d; }
+  ctx.setTransform(1,0,0,1,0,0);
+  replayStrokes(strokesFor(curQ().id));
 }
 
 /* ============================================================
