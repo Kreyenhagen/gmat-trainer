@@ -180,17 +180,18 @@ input:focus,select:focus,textarea:focus{outline:2px solid var(--accent);outline-
 .qmeta .pill{background:var(--surface-2);border:1px solid var(--border);border-radius:99px;padding:2px 10px;
   text-transform:capitalize}
 .stem{font-size:clamp(13px,1.4vw,15px);line-height:1.5;font-weight:500;max-width:60ch}
-.choices{display:flex;flex-direction:column;gap:7px;max-width:520px}
-.choice{display:flex;align-items:center;gap:10px;background:var(--surface);border:1.5px solid var(--border);
-  border-radius:10px;padding:8px 11px;text-align:left;color:var(--ink);font-size:13px;width:100%;box-shadow:var(--shadow)}
-.choice .k{width:21px;height:21px;border-radius:6px;background:var(--surface-2);border:1px solid var(--border);
-  display:grid;place-items:center;font-weight:700;font-size:11px;flex:none}
-.choice.sel{border-color:var(--accent);background:var(--accent-soft)}
+.choices{display:flex;flex-direction:column;gap:5px;max-width:520px}
+.choice{display:flex;align-items:center;gap:10px;background:transparent;border:none;
+  border-radius:6px;padding:4px 4px;text-align:left;color:var(--ink);font-size:13px;width:100%}
+.choice:hover .k{border-color:var(--accent)}
+.choice .k{width:23px;height:23px;border-radius:7px;background:var(--surface-2);border:1.5px solid var(--border);
+  display:grid;place-items:center;font-weight:700;font-size:11px;flex:none;color:var(--ink)}
 .choice.sel .k{background:var(--accent);color:#fff;border-color:transparent}
-.choice.correct{border-color:var(--good);background:var(--good-soft)}
-.choice.correct .k{background:var(--good);color:#fff}
-.choice.wrong{border-color:var(--bad);background:var(--bad-soft)}
-.choice.wrong .k{background:var(--bad);color:#fff}
+.choice.sel span:last-child{color:var(--accent);font-weight:600}
+.choice.correct .k{background:var(--good);color:#fff;border-color:transparent}
+.choice.correct span:last-child{color:var(--good);font-weight:600}
+.choice.wrong .k{background:var(--bad);color:#fff;border-color:transparent}
+.choice.wrong span:last-child{color:var(--bad);font-weight:600}
 .checkbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;max-width:640px}
 .verdict{font-weight:700;font-size:16px;display:flex;align-items:center;gap:8px}
 .verdict.good{color:var(--good)} .verdict.bad{color:var(--bad)}
