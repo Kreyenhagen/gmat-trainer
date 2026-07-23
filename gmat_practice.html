@@ -174,11 +174,14 @@ input:focus,select:focus,textarea:focus{outline:2px solid var(--accent);outline-
 .pbar{flex:1;height:6px;background:var(--surface-2);border-radius:99px;overflow:hidden;max-width:260px}
 .pbar>i{display:block;height:100%;background:var(--accent);width:0;transition:width .25s}
 
-/* qscroll covers the ENTIRE stage (including behind the topbar) so the canvas
-   overlaid on top of it is drawable everywhere; qcontent's own top padding
-   keeps the question text clear of the floating topbar */
+/* qscroll is the fixed, non-scrolling pane (covers the ENTIRE stage, including
+   behind the topbar); tools/navbar live directly in it so they stay pinned in
+   place. scroll-inner is what actually scrolls, holding the question text AND
+   a canvas tall enough to include a large blank scratch area below the last
+   answer — they scroll together so ink stays glued to the page as you scroll. */
 #qscroll{position:absolute;inset:0;overflow:hidden}
-#qcontent{position:absolute;inset:0;overflow-y:auto;padding:72px 22px 90px;display:flex;flex-direction:column;gap:16px}
+#scroll-inner{position:absolute;inset:0;overflow-y:auto}
+#qcontent{position:relative;padding:72px 22px 40px;display:flex;flex-direction:column;gap:16px}
 .qmeta{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap;font-size:12px;color:var(--muted)}
 .qmeta-left{display:flex;gap:8px;align-items:center}
 .qmeta .pill{background:var(--surface-2);border:1px solid var(--border);border-radius:99px;padding:2px 10px;
@@ -214,7 +217,9 @@ input:focus,select:focus,textarea:focus{outline:2px solid var(--accent);outline-
 .rate button[data-d="high"].on{border-color:var(--bad);background:var(--bad-soft)}
 
 /* drawing canvas overlay */
-#canvas{position:absolute;inset:0;touch-action:none;z-index:3}
+/* width/height are set in JS to match scroll-inner's full scrollable extent,
+   which is taller than the visible pane on purpose (scratch space) */
+#canvas{position:absolute;top:0;left:0;touch-action:none;z-index:3}
 /* toolbar */
 .tools{position:absolute;left:50%;transform:translateX(-50%);bottom:14px;z-index:6;
   display:flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--border);
@@ -378,8 +383,10 @@ a.link{color:var(--accent);text-decoration:none}
       </div>
 
       <div id="qscroll">
-        <div id="qcontent"><!-- filled by JS --></div>
-        <canvas id="canvas"></canvas>
+        <div id="scroll-inner">
+          <div id="qcontent"><!-- filled by JS --></div>
+          <canvas id="canvas"></canvas>
+        </div>
 
         <!-- drawing toolbar -->
         <div class="tools" id="tools">
@@ -723,9 +730,6 @@ function loadQuestion(){
   // size canvas to the pane (no preserve — we're about to load this question's own drawing)
   resizeCanvas(false);
   restoreDrawing();
-  // re-measure one frame later in case layout (e.g. browser chrome collapsing) was
-  // still settling when we first measured, so the canvas never quietly falls short
-  requestAnimationFrame(()=>{ resizeCanvas(false); restoreDrawing(); });
 }
 
 function selectChoice(key){
@@ -962,28 +966,26 @@ const DPR=()=>Math.max(1,window.devicePixelRatio||1);
 // there is no separately-cached dpr/transform that can drift out of sync with
 // the actual rendered box, which is what causes drawing to "run ahead" of the
 // pointer the further you move from the top-left corner.
+//
+// The canvas is also made noticeably taller than the visible pane — it covers
+// the full question content PLUS a large blank scratch area below it — so
+// there's always plenty of room to work, reached by scrolling.
+const SCRATCH_EXTRA_PANES = 1.4; // extra blank scratch space, as a multiple of one pane height
 function resizeCanvas(preserve=true){
-  const r=canvas.getBoundingClientRect();
+  const pane=el("scroll-inner"), qc=el("qcontent");
+  const paneRect=pane.getBoundingClientRect();
   const dpr=DPR();
-  const data=(preserve&&canvas.width && r.width>0)?canvas.toDataURL():null;
-  canvas.width=Math.max(1,Math.round(r.width*dpr));
-  canvas.height=Math.max(1,Math.round(r.height*dpr));
+  const cssW=paneRect.width;
+  const cssH=Math.max(qc.scrollHeight,paneRect.height) + paneRect.height*SCRATCH_EXTRA_PANES;
+  const data=(preserve&&canvas.width && cssW>0)?canvas.toDataURL():null;
+  canvas.style.width=cssW+"px"; canvas.style.height=cssH+"px";
+  canvas.width=Math.max(1,Math.round(cssW*dpr));
+  canvas.height=Math.max(1,Math.round(cssH*dpr));
   ctx.setTransform(1,0,0,1,0,0);
   ctx.lineCap="round"; ctx.lineJoin="round";
   if(data){ const img=new Image(); img.onload=()=>ctx.drawImage(img,0,0,canvas.width,canvas.height); img.src=data; }
 }
 window.addEventListener("resize",()=>{clearTimeout(window._rz);window._rz=setTimeout(()=>resizeCanvas(true),120);});
-window.addEventListener("orientationchange",()=>{clearTimeout(window._rz);window._rz=setTimeout(()=>resizeCanvas(true),200);});
-if(window.visualViewport) window.visualViewport.addEventListener("resize",()=>{clearTimeout(window._rz);window._rz=setTimeout(()=>resizeCanvas(true),120);});
-// Some tablet browsers change the actual pane box (e.g. address-bar collapse changing
-// 100dvh) without ever firing a window "resize" event. Watching the pane's own box
-// directly guarantees the canvas is re-synced whenever its true rendered size changes,
-// regardless of what caused it — this is what keeps the drawable area pinned to the
-// full pane height instead of quietly falling short.
-if(window.ResizeObserver){
-  new ResizeObserver(()=>{clearTimeout(window._rz);window._rz=setTimeout(()=>resizeCanvas(true),80);})
-    .observe(el("qscroll"));
-}
 
 function pushUndo(){ try{undoStack.push(ctx.getImageData(0,0,canvas.width,canvas.height)); if(undoStack.length>15)undoStack.shift();}catch(e){} }
 
@@ -1010,7 +1012,7 @@ canvas.addEventListener("pointermove",e=>{
   if(!curPointer.draw){ // navigate mode: drag scrolls the question content
     const dy=e.clientY-curPointer.ly; curPointer.ly=e.clientY;
     if(Math.abs(e.clientY-curPointer.sy)>6||Math.abs(e.clientX-curPointer.sx)>6) curPointer.moved=true;
-    const sc=el("qcontent"); if(sc) sc.scrollTop-=dy;
+    const sc=el("scroll-inner"); if(sc) sc.scrollTop-=dy;
     return;
   }
   e.preventDefault();
