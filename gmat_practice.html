@@ -723,6 +723,9 @@ function loadQuestion(){
   // size canvas to the pane (no preserve — we're about to load this question's own drawing)
   resizeCanvas(false);
   restoreDrawing();
+  // re-measure one frame later in case layout (e.g. browser chrome collapsing) was
+  // still settling when we first measured, so the canvas never quietly falls short
+  requestAnimationFrame(()=>{ resizeCanvas(false); restoreDrawing(); });
 }
 
 function selectChoice(key){
@@ -970,6 +973,17 @@ function resizeCanvas(preserve=true){
   if(data){ const img=new Image(); img.onload=()=>ctx.drawImage(img,0,0,canvas.width,canvas.height); img.src=data; }
 }
 window.addEventListener("resize",()=>{clearTimeout(window._rz);window._rz=setTimeout(()=>resizeCanvas(true),120);});
+window.addEventListener("orientationchange",()=>{clearTimeout(window._rz);window._rz=setTimeout(()=>resizeCanvas(true),200);});
+if(window.visualViewport) window.visualViewport.addEventListener("resize",()=>{clearTimeout(window._rz);window._rz=setTimeout(()=>resizeCanvas(true),120);});
+// Some tablet browsers change the actual pane box (e.g. address-bar collapse changing
+// 100dvh) without ever firing a window "resize" event. Watching the pane's own box
+// directly guarantees the canvas is re-synced whenever its true rendered size changes,
+// regardless of what caused it — this is what keeps the drawable area pinned to the
+// full pane height instead of quietly falling short.
+if(window.ResizeObserver){
+  new ResizeObserver(()=>{clearTimeout(window._rz);window._rz=setTimeout(()=>resizeCanvas(true),80);})
+    .observe(el("qscroll"));
+}
 
 function pushUndo(){ try{undoStack.push(ctx.getImageData(0,0,canvas.width,canvas.height)); if(undoStack.length>15)undoStack.shift();}catch(e){} }
 
