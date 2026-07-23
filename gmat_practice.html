@@ -967,6 +967,21 @@ const DPR=()=>Math.min(2,Math.max(1,window.devicePixelRatio||1));
 const PEN_MIN=0.5, PEN_RANGE=1.6, ERASER_W=18;
 // Segments whose widths differ by less than this can share one stroke() call.
 const WIDTH_BATCH_TOL=0.4;
+// How far a pen stroke may travel (CSS px) and still count as a tap on a control.
+const TAP_SLOP=7;
+// A stroke whose points all fall within this radius (device px) is drawn as a dot.
+const DOT_EXTENT=1.5;
+
+// True when the whole stroke sits inside DOT_EXTENT of its first point.
+// Exits early as soon as any point escapes, so it's cheap on long strokes.
+function isTinyMark(pts){
+  const p0=pts[0];
+  for(let i=1;i<pts.length;i++){
+    if(Math.hypot(pts[i].x-p0.x,pts[i].y-p0.y)>DOT_EXTENT) return false;
+  }
+  return true;
+}
+function maxWidth(pts){ let w=0; for(const p of pts) if(p.w>w) w=p.w; return w; }
 
 /* ---- cached canvas rect ----
    pos() used to call getBoundingClientRect() per point. With coalesced events
@@ -1061,7 +1076,8 @@ function replayStrokes(list){
     ctx.globalCompositeOperation = s.tool==="eraser" ? "destination-out" : "source-over";
     ctx.strokeStyle=s.color; ctx.fillStyle=s.color;
     const pts=s.points.map(([nx,ny,nw])=>({x:nx*canvas.width,y:ny*canvas.height,w:nw*canvas.width}));
-    if(pts.length===1){ drawDot(pts[0].x,pts[0].y,pts[0].w); return; }
+    // matches the live path: a mark with no real extent is painted as a dot
+    if(isTinyMark(pts)){ drawDot(pts[0].x,pts[0].y,maxWidth(pts)); return; }
     renderSegments(pts,0,pts.length);
   });
 }
@@ -1118,13 +1134,20 @@ function endStroke(e){
   if(cp.draw){
     try{canvas.releasePointerCapture(e.pointerId);}catch(_){}
     const qid=curQ().id;
-    // treat a tiny pen mark as a tap → discard it (redraw without it) and forward the tap to the UI
-    if(e.pointerType==="pen" && moveDist<7*(cp.scale||1) && tool!=="eraser"){
-      replayStrokes(strokesFor(qid));
-      forwardTap(cp.sx,cp.sy);
+    // A barely-moving pen stroke is only treated as a UI tap when it actually
+    // landed ON a control. Over blank scratch space there is nothing to tap, so
+    // it is a genuine mark — a period, an i-dot — and must be kept. (Previously
+    // every small stroke was discarded, which silently ate all such dots.)
+    const tapTarget = (e.pointerType==="pen" && moveDist<TAP_SLOP*(cp.scale||1) && tool!=="eraser")
+      ? uiTargetAt(cp.sx,cp.sy) : null;
+    if(tapTarget){
+      replayStrokes(strokesFor(qid));   // discard the stray mark
+      if(tapTarget.tagName==="TEXTAREA"||tapTarget.tagName==="INPUT") tapTarget.focus();
+      else tapTarget.click();
     } else if(curStroke && curStroke.points.length){
-      // a committed single-point stroke draws as a dot (renderSegments needs 2+)
-      if(curRaw && curRaw.length===1) drawDot(curRaw[0].x,curRaw[0].y,curRaw[0].w);
+      // Guarantee the mark is visible: a stroke with no real extent renders as
+      // a dot, since a zero-length path isn't reliably painted across browsers.
+      if(curRaw && isTinyMark(curRaw)) drawDot(curRaw[0].x,curRaw[0].y,maxWidth(curRaw));
       strokesFor(qid).push(curStroke);
     }
     curStroke=null; curRaw=null; drawnSeg=0;
@@ -1154,16 +1177,21 @@ function penWidth(e,scale){
   return Math.round((PEN_MIN + pr*PEN_RANGE)*scale*2)/2;
 }
 
-function forwardTap(cx,cy){
+// What interactive control (if any) sits under this screen point, looking
+// *through* the canvas overlay. Kept separate from forwardTap so a stroke can
+// ask "would this tap hit a control?" before deciding to discard itself.
+function uiTargetAt(cx,cy){
   canvas.style.pointerEvents="none";
   const target=document.elementFromPoint(cx,cy);
   canvas.style.pointerEvents="";
-  if(!target)return;
-  const clickable=target.closest("button, .choice, textarea, input, select, a");
-  if(clickable){
-    if(clickable.tagName==="TEXTAREA"||clickable.tagName==="INPUT"){ clickable.focus(); }
-    else clickable.click();
-  }
+  return target ? target.closest("button, .choice, textarea, input, select, a") : null;
+}
+function forwardTap(cx,cy){
+  const clickable=uiTargetAt(cx,cy);
+  if(!clickable) return false;
+  if(clickable.tagName==="TEXTAREA"||clickable.tagName==="INPUT"){ clickable.focus(); }
+  else clickable.click();
+  return true;
 }
 
 /* toolbar */
