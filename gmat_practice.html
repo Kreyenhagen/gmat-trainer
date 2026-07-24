@@ -186,7 +186,27 @@ input:focus,select:focus,textarea:focus{outline:2px solid var(--accent);outline-
 .qmeta-left{display:flex;gap:8px;align-items:center}
 .qmeta .pill{background:var(--surface-2);border:1px solid var(--border);border-radius:99px;padding:2px 10px;
   text-transform:capitalize}
+/* question body: single column normally; passage + question side-by-side when an
+   extra is attached, collapsing to one column when the pane is narrow */
+.qbody{display:grid;gap:20px;align-items:start}
+.qbody.has-extra{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+.qmain{display:flex;flex-direction:column;gap:14px;min-width:0}
+.extra{background:var(--surface);border:1px solid var(--border);border-radius:12px;
+  padding:14px 16px;box-shadow:var(--shadow);min-width:0}
+.extra-h{display:flex;align-items:center;gap:8px;font-size:11px;font-weight:700;
+  text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin-bottom:9px}
+.extra-h .extra-id{margin-left:auto;font-family:var(--mono);text-transform:none;
+  letter-spacing:0;font-weight:400;opacity:.7}
+.extra-c{font-size:13px;line-height:1.65}
+.extra-c p{margin:0 0 11px}
+.extra-c p:last-child{margin-bottom:0}
+.extra-pre{white-space:pre-wrap;font-family:var(--mono);font-size:12.5px;margin:0;line-height:1.5}
+.extra-img{max-width:100%;height:auto;border-radius:8px}
+.extra-missing{font-size:12.5px;color:var(--bad);background:var(--bad-soft);
+  border:1px solid var(--border);border-radius:9px;padding:9px 11px;line-height:1.5}
 .stem{font-size:clamp(13px,1.4vw,15px);line-height:1.5;font-weight:500;max-width:60ch}
+.stem p{margin:0 0 10px}
+.stem p:last-child{margin-bottom:0}
 .choices{display:flex;flex-direction:column;gap:5px;max-width:520px}
 .choice{display:flex;align-items:center;gap:10px;background:transparent;border:none;
   border-radius:6px;padding:4px 4px;text-align:left;color:var(--ink);font-size:13px;width:100%}
@@ -280,10 +300,11 @@ a.link{color:var(--accent);text-decoration:none}
           <button class="btn primary" id="load-bank">📁 Load question bank</button>
           <button class="btn" id="export-bank">⬇ Export current bank</button>
         </div>
-        <input type="file" id="bank-file" accept=".txt,.json,application/json,text/plain" style="display:none">
-        <div class="hintnote" style="margin-top:12px">Your questions stay on this device only — pick your
-          <code>questions_db.txt</code>. Format: a JSON array of
-          <code>{id, stem, choices, correct_answer, hint, steps}</code>.</div>
+        <input type="file" id="bank-file" multiple accept=".txt,.json,application/json,text/plain" style="display:none">
+        <div class="hintnote" style="margin-top:12px">Your questions stay on this device only — select
+          <b>both</b> <code>questions_db.txt</code> and <code>extras_db.txt</code> at once (each is
+          auto-detected). Questions: <code>{id, stem, choices, correct_answer, hint, steps, extras_id}</code>.
+          Extras: <code>{extras_id, type, content}</code> — a passage/table/figure shared by several questions.</div>
       </div>
 
       <div class="card">
@@ -292,6 +313,10 @@ a.link{color:var(--accent);text-decoration:none}
           <div class="field">
             <label for="f-count">How many questions</label>
             <input type="number" id="f-count" min="1" value="10">
+          </div>
+          <div class="field">
+            <label for="f-section">Section / type</label>
+            <select id="f-section"><option value="all">Everything</option></select>
           </div>
           <div class="field">
             <label for="f-filter">Draw from</label>
@@ -476,6 +501,7 @@ const DEMO_QUESTIONS = [
 // uploaded at runtime (Load question bank) and stored in this browser only.
 let QUESTIONS = [];
 let byId = {};
+let EXTRAS = {};             // extras_id -> {extras_id,type,title,content}
 let questionSource = "demo"; // "demo" | "uploaded"
 
 /* ============================================================
@@ -493,6 +519,14 @@ function fmt(s){
   return s;
 }
 function wrapMath(html){ return '<span class="math">'+html+'</span>'; }
+// Multi-paragraph prose: blank lines become paragraphs, single newlines become
+// line breaks. Verbal stems and passages rely on this; quant stems have no
+// newlines so they render identically to before.
+function fmtBlock(s){
+  const paras=String(s==null?"":s).split(/\n\s*\n/).map(p=>p.trim()).filter(Boolean);
+  if(!paras.length) return "";
+  return paras.map(p=>"<p>"+fmt(p).replace(/\n/g,"<br>")+"</p>").join("");
+}
 
 /* ============================================================
    STATE + persistence
@@ -501,7 +535,8 @@ const LS = {
   progress:"gmat_progress_v1",
   settings:"gmat_settings_v1",
   sessions:"gmat_sessions_v1",
-  questions:"gmat_questions_v1"
+  questions:"gmat_questions_v1",
+  extras:"gmat_extras_v1"
 };
 let progress = load(LS.progress, {});      // {qid:{attempts,lastCorrect,everWrong,everHint,lastUsedHint}}
 let settings = load(LS.settings, {apiKey:"",model:"claude-sonnet-5",fingerDraws:false,theme:null});
@@ -529,6 +564,7 @@ function parseBank(text){
       id: q.id || ("q"+String(i+1).padStart(3,"0")),
       section: q.section || "quant",
       type: q.type || "problem_solving",
+      extras_id: q.extras_id || null,   // links to an entry in the extras bank
       stem: q.stem,
       choices: q.choices,
       correct_answer: String(q.correct_answer).trim(),
@@ -541,11 +577,35 @@ function parseBank(text){
   if(out.length===0) throw new Error("No questions found in the file.");
   return out;
 }
+
+/* ---- extras bank: passages, tables, figures shared by several questions ---- */
+function setExtras(arr){ EXTRAS = arr.reduce((m,e)=>(m[e.extras_id]=e,m),{}); }
+function parseExtras(text){
+  const data = JSON.parse(text);
+  if(!Array.isArray(data)) throw new Error("Extras file must be a JSON array.");
+  const out = data.map((e,i)=>{
+    if(!e || typeof e!=="object") throw new Error("Extra "+(i+1)+" is not an object.");
+    if(!e.extras_id) throw new Error("Extra "+(i+1)+" is missing 'extras_id'.");
+    return { extras_id:String(e.extras_id), type:e.type||"passage", title:e.title||"", content:e.content||"" };
+  });
+  return out;
+}
+// Works out whether an uploaded file is the question bank or the extras bank,
+// so both can be picked at once and sorted out automatically.
+function detectBankKind(data){
+  if(!Array.isArray(data)||!data.length) return null;
+  const s=data[0];
+  if(s && s.stem && Array.isArray(s.choices)) return "questions";
+  if(s && s.extras_id && s.content!==undefined) return "extras";
+  return null;
+}
 // load whatever is saved in this browser; fall back to demo
 function loadQuestionBank(){
   const saved = load(LS.questions, null);
   if(saved && Array.isArray(saved) && saved.length){ setQuestions(saved,"uploaded"); }
   else { setQuestions(DEMO_QUESTIONS.slice(),"demo"); }
+  const ex = load(LS.extras, null);
+  setExtras(Array.isArray(ex) ? ex : []);
 }
 
 /* session runtime */
@@ -588,6 +648,7 @@ function renderHome(){
     const diffColor={low:"var(--good)",medium:"var(--warn)",high:"var(--bad)"}[p.difficulty];
     b.innerHTML=`<span class="dot"></span><span class="qid">${q.id}</span>
       <span class="txt">${fmt(q.stem)}</span>
+      ${q.extras_id?`<span class="tag" title="has an attached ${EXTRAS[q.extras_id]?"":"(missing) "}extra">📄</span>`:''}
       ${p.lastUsedHint?'<span class="badge">hint</span>':''}
       ${p.difficulty?`<span class="tag" style="color:${diffColor};font-weight:700;text-transform:capitalize">${p.difficulty}</span>`:''}
       <span class="tag">${q.type.replace("_"," ")}</span>`;
@@ -596,41 +657,55 @@ function renderHome(){
   });
   if(QUESTIONS.length===0){ list.innerHTML='<div class="cl-empty">No questions loaded yet — tap “Load question bank” above.</div>'; }
   renderBankStatus();
+  renderSectionFilter();
   updatePoolNote();
 }
 
 function renderBankStatus(){
   const s=el("bank-status"); if(!s)return;
   const withSteps=QUESTIONS.filter(q=>q.steps&&q.steps.length).length;
+  const nExtras=Object.keys(EXTRAS).length;
+  const needExtras=QUESTIONS.filter(q=>q.extras_id&&!EXTRAS[q.extras_id]).length;
   if(questionSource==="uploaded"){
-    s.innerHTML=`✅ <b>${QUESTIONS.length}</b> questions loaded from your file · ${withSteps} with saved solutions.
-      <span style="color:var(--muted)"> Stored on this device.</span>`;
+    const bySec=QUESTIONS.reduce((m,q)=>(m[q.section]=(m[q.section]||0)+1,m),{});
+    const secTxt=Object.entries(bySec).map(([k,v])=>`${v} ${k}`).join(" · ");
+    s.innerHTML=`✅ <b>${QUESTIONS.length}</b> questions loaded (${secTxt}) · ${withSteps} with saved solutions
+      · <b>${nExtras}</b> extras.<span style="color:var(--muted)"> Stored on this device.</span>
+      ${needExtras?`<br><span style="color:var(--bad)">⚠ ${needExtras} question(s) reference an extra that isn't loaded — also pick your <code>extras_db.txt</code>.</span>`:""}`;
   } else {
     s.innerHTML=`Showing <b>${QUESTIONS.length}</b> built-in demo questions. Load your own
-      <code>questions_db.txt</code> to practice your full bank.`;
+      <code>questions_db.txt</code> (and <code>extras_db.txt</code>) to practice your full bank.`;
   }
 }
 
 /* ---- upload / export handlers ---- */
 function initBankUI(){
   el("load-bank").onclick=()=>el("bank-file").click();
-  el("bank-file").addEventListener("change",e=>{
-    const file=e.target.files[0]; if(!file)return;
-    const reader=new FileReader();
-    reader.onload=()=>{
+  // Accepts both files at once and sorts out which is which by shape.
+  el("bank-file").addEventListener("change",async e=>{
+    const files=[...e.target.files];
+    e.target.value="";               // allow re-selecting the same file later
+    if(!files.length) return;
+    const done=[], failed=[];
+    for(const file of files){
       try{
-        const bank=parseBank(reader.result);
-        save(LS.questions,bank);
-        setQuestions(bank,"uploaded");
-        renderHome();
-        toast(`Loaded ${bank.length} questions.`);
-      }catch(err){
-        toast("Couldn't load: "+err.message);
-      }
-    };
-    reader.onerror=()=>toast("Couldn't read that file.");
-    reader.readAsText(file);
-    e.target.value="";  // allow re-selecting the same file later
+        const text=await file.text();
+        const kind=detectBankKind(JSON.parse(text));
+        if(kind==="questions"){
+          const bank=parseBank(text);
+          save(LS.questions,bank); setQuestions(bank,"uploaded");
+          done.push(`${bank.length} questions`);
+        } else if(kind==="extras"){
+          const ex=parseExtras(text);
+          save(LS.extras,ex); setExtras(ex);
+          done.push(`${ex.length} extras`);
+        } else {
+          failed.push(`${file.name}: unrecognized format`);
+        }
+      }catch(err){ failed.push(`${file.name}: ${err.message}`); }
+    }
+    renderHome();
+    toast(failed.length ? "Couldn't load — "+failed[0] : "Loaded "+done.join(" · ")+".");
   });
   el("export-bank").onclick=()=>{
     const blob=new Blob([JSON.stringify(QUESTIONS,null,0).replace(/},\{/g,"},\n{")+"\n"],{type:"application/json"});
@@ -641,8 +716,30 @@ function initBankUI(){
   };
 }
 
-function poolFor(filter,fresh,diff){
-  let ids = QUESTIONS.map(q=>q.id);
+// Rebuilds the section/type dropdown from whatever bank is loaded, so it always
+// offers exactly the sections and types that actually exist.
+function renderSectionFilter(){
+  const sel=el("f-section"); if(!sel)return;
+  const prev=sel.value;
+  const sections=[...new Set(QUESTIONS.map(q=>q.section).filter(Boolean))].sort();
+  const types=[...new Set(QUESTIONS.map(q=>q.type).filter(Boolean))].sort();
+  const label=s=>s.replace(/_/g," ").replace(/\b\w/g,c=>c.toUpperCase());
+  let html='<option value="all">Everything</option>';
+  if(sections.length>1) sections.forEach(s=>{
+    html+=`<option value="section:${s}">${label(s)} — all types</option>`;
+  });
+  types.forEach(t=>{ html+=`<option value="type:${t}">${label(t)}</option>`; });
+  sel.innerHTML=html;
+  if([...sel.options].some(o=>o.value===prev)) sel.value=prev;
+}
+function matchesScope(q,scope){
+  if(!scope||scope==="all") return true;
+  const [kind,val]=scope.split(":");
+  return kind==="section" ? q.section===val : q.type===val;
+}
+
+function poolFor(filter,fresh,diff,scope){
+  let ids = QUESTIONS.filter(q=>matchesScope(q,scope)).map(q=>q.id);
   if(filter==="wrong") ids=ids.filter(id=>progress[id]?.lastCorrect===false);
   else if(filter==="hints") ids=ids.filter(id=>progress[id]?.lastUsedHint===true);
   else if(filter==="both") ids=ids.filter(id=>progress[id]?.lastCorrect===false||progress[id]?.lastUsedHint===true);
@@ -651,17 +748,18 @@ function poolFor(filter,fresh,diff){
   if(fresh) ids=ids.filter(id=>progress[id]?.lastCorrect!==true);
   return ids;
 }
+const currentPool=()=>poolFor(el("f-filter").value, el("f-fresh").checked, el("f-diff").value, el("f-section").value);
 function updatePoolNote(){
-  const pool=poolFor(el("f-filter").value, el("f-fresh").checked, el("f-diff").value);
+  const pool=currentPool();
   const n=parseInt(el("f-count").value)||0;
   el("pool-note").textContent = pool.length===0
-    ? "No questions match this filter yet — try 'All questions'."
+    ? "No questions match this filter yet — try widening it."
     : `${pool.length} question${pool.length>1?"s":""} available · you'll get ${Math.min(n,pool.length)}.`;
 }
-["f-filter","f-fresh","f-count","f-diff"].forEach(id=>el(id).addEventListener("input",updatePoolNote));
+["f-filter","f-fresh","f-count","f-diff","f-section"].forEach(id=>el(id).addEventListener("input",updatePoolNote));
 
 el("start-session").onclick=()=>{
-  const pool=poolFor(el("f-filter").value, el("f-fresh").checked, el("f-diff").value);
+  const pool=currentPool();
   if(pool.length===0){toast("No questions match that filter.");return;}
   let ids=pool.slice();
   if(el("f-order").value==="random") shuffle(ids);
@@ -689,6 +787,18 @@ el("go-home").onclick=endToHome;
 
 function curQ(){ return byId[session.ids[session.idx]]; }
 
+// Renders one extra by its type. Passages are prose; anything tabular keeps the
+// author's own spacing; an image type accepts an embedded data: URI.
+function renderExtra(ex){
+  const t=(ex.type||"passage").toLowerCase();
+  if(t==="image"||t==="figure"||t==="graph"){
+    if(/^data:image\//.test(ex.content)) return `<img class="extra-img" alt="${escapeHtml(ex.title||t)}" src="${escapeHtml(ex.content)}">`;
+    return `<pre class="extra-pre">${escapeHtml(ex.content)}</pre>`;
+  }
+  if(t==="table") return `<pre class="extra-pre">${escapeHtml(ex.content)}</pre>`;
+  return fmtBlock(ex.content);   // passage / default
+}
+
 function loadQuestion(){
   selected=null; checkedFirst=false;
   const q=curQ();
@@ -699,7 +809,9 @@ function loadQuestion(){
   el("prev-q").style.opacity=session.idx===0?.4:1;
   el("next-q").textContent = session.idx===session.ids.length-1 ? "Finish ▸" : "Next ▸";
 
-  // question content
+  // question content — with its linked extra (passage/table/figure) beside it
+  const extra = q.extras_id ? EXTRAS[q.extras_id] : null;
+  const missingExtra = q.extras_id && !extra;
   const c=el("qcontent");
   c.innerHTML=`
     <div class="qmeta">
@@ -708,9 +820,21 @@ function loadQuestion(){
         <span style="font-family:var(--mono)">${q.id}</span></div>
       <div class="rate" id="rate"></div>
     </div>
-    <div class="stem">${wrapMath(fmt(q.stem))}</div>
-    <div class="choices" id="choices"></div>
-    <div class="checkbar" id="checkbar"></div>`;
+    <div class="qbody${extra?" has-extra":""}">
+      ${extra?`<div class="extra">
+          <div class="extra-h">${extra.type==="passage"?"Passage":escapeHtml(extra.type)}${
+            extra.title?" — "+escapeHtml(extra.title):""}<span class="extra-id">${escapeHtml(extra.extras_id)}</span></div>
+          <div class="extra-c">${renderExtra(extra)}</div>
+        </div>`:""}
+      <div class="qmain">
+        ${missingExtra?`<div class="extra-missing">⚠ This question references extra
+          <code>${escapeHtml(q.extras_id)}</code>, which isn't loaded. Load your
+          <code>extras_db.txt</code> from the home screen.</div>`:""}
+        <div class="stem">${wrapMath(fmtBlock(q.stem))}</div>
+        <div class="choices" id="choices"></div>
+        <div class="checkbar" id="checkbar"></div>
+      </div>
+    </div>`;
   const ch=el("choices");
   q.choices.forEach(choice=>{
     const m=choice.match(/^([A-E])\)\s*(.*)$/);
@@ -918,14 +1042,23 @@ async function sendAsk(){
   const history=(session.chats[q.id]||[]).filter(m=>m.role==="user"||m.role==="ai")
     .map(m=>({role:m.role==="user"?"user":"assistant",content:stripHtml(m.content)}));
 
-  const sys=`You are a patient GMAT quant tutor. The student is working on this exact problem:
-
+  // Reading-comprehension questions are meaningless without their passage, so
+  // include the linked extra in the tutor's context when there is one.
+  const ex = q.extras_id ? EXTRAS[q.extras_id] : null;
+  const sys=`You are a patient GMAT tutor helping with a ${String(q.section||"").toUpperCase()} ${
+    String(q.type||"").replace(/_/g," ")} question. The student is working on this exact problem:
+${ex?`
+${(ex.type||"passage").toUpperCase()} (the question refers to this):
+"""
+${ex.content}
+"""
+`:""}
 QUESTION: ${q.stem}
 CHOICES: ${q.choices.join("; ")}
 CORRECT ANSWER: ${q.correct_answer}
 REFERENCE SOLUTION: ${q.steps.join(" ")}
 
-Guidelines: If the student asks for a hint, give ONE nudge without revealing the final answer. If they ask to be walked through it or for the full solution, give the complete steps. Be concise and clear. Use plain-text math (^ for exponents, sqrt(), * for multiply). Do not use markdown headers or tables.`;
+Guidelines: If the student asks for a hint, give ONE nudge without revealing the final answer. If they ask to be walked through it or for the full solution, give the complete steps. For reading comprehension, point to the specific part of the passage that settles it. For critical reasoning, name the argument's conclusion and the gap being tested. Be concise and clear. Use plain-text math (^ for exponents, sqrt(), * for multiply). Do not use markdown headers or tables.`;
 
   try{
     const res=await fetch("https://api.anthropic.com/v1/messages",{

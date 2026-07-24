@@ -1,6 +1,7 @@
 # Private question bank — kept on-device only, never published.
 # The app loads it at runtime via "Load question bank".
 questions_db.txt
+extras_db.txt
 
 # OS / OneDrive / editor cruft
 desktop.ini
