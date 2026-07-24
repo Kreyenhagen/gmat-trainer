@@ -495,7 +495,24 @@ const DEMO_QUESTIONS = [
 {id:"demo2",section:"quant",type:"problem_solving",stem:"After a 20% discount, a shirt costs $40. What was its original price?",
  choices:["A) $32","B) $45","C) $48","D) $50","E) $60"],correct_answer:"D",
  hint:"A 20% discount means the $40 you pay is 80% of the original price.",
- steps:["$40 = 80% of the original = 0.8 × original.","original = 40 / 0.8 = $50."]}
+ steps:["$40 = 80% of the original = 0.8 × original.","original = 40 / 0.8 = $50."]},
+{id:"demo3",section:"verbal",type:"critical_reasoning",extras_id:null,
+ stem:"The Riverton Public Library began offering free evening coding classes last year. Over the same period, the library's overall evening attendance rose by 40 percent. The library director concludes that the coding classes caused the increase, and plans to add more of them to raise attendance further.\n\nWhich of the following, if true, most seriously weakens the director's conclusion?",
+ choices:["A) The coding classes were taught by volunteers, so they cost the library very little to run.","B) Attendance at the library's daytime programs remained unchanged over the same period.","C) The library extended its evening hours by two hours at the same time it introduced the coding classes.","D) Some people who attended the coding classes also borrowed books during their visits.","E) A library in a neighboring town saw no attendance change after introducing similar classes."],
+ correct_answer:"C",
+ hint:"The conclusion is causal: classes caused the rise. To weaken a causal claim built on a correlation, look for something else that changed at the same time and could explain the same result.",
+ steps:["Identify the conclusion: the coding classes caused the 40 percent rise in evening attendance.","Note the evidence is only a correlation — the classes began and attendance rose over the same period.","To weaken a causal conclusion drawn from a correlation, supply an alternative explanation for the result.","Choice C does exactly that: evening hours were extended at the same moment, so the extra attendance may simply reflect the library being open longer, not the classes.","Eliminate the rest — the classes' low cost (A), flat daytime figures (B), and incidental book borrowing (D) leave the causal link untouched, and another town's different outcome (E) offers no explanation for Riverton's own rise."]},
+{id:"demo4",section:"verbal",type:"reading_comprehension",extras_id:"demo_rc1",
+ stem:"The author of the passage would most likely agree with which of the following statements about the adoption of standard time zones?",
+ choices:["A) It was delayed unnecessarily by the resistance of municipal authorities.","B) It involved a real loss as well as a gain, despite being commonly portrayed as simple progress.","C) It could not have occurred without direct intervention by national governments.","D) It was intended primarily to benefit passengers rather than railway companies.","E) It failed to resolve the scheduling problems that had prompted it."],
+ correct_answer:"B",
+ hint:"The first two paragraphs narrate; the last one evaluates. Notice the contrast between how historians 'often' treat the episode and what the author says that reading 'understates.'",
+ steps:["The question asks for the author's own view, so weight the evaluative final paragraph over the narrative that precedes it.","There the author reports that historians treat the change as 'a straightforward triumph of efficiency,' then objects that this reading 'understates what was surrendered' — an explicit disagreement with the purely positive account.","What was surrendered is then named: local time 'encoded a genuine relationship between a community and its own position on the earth,' replaced by an 'abstraction... indifferent to place.'","Choice B matches: a genuine gain in convenience accompanied by a genuine loss, against the common portrayal.","Eliminate the others — A misreads the resistance as causing delay, C contradicts paragraph two (the railways acted and municipalities merely ratified), D is never claimed, and E contradicts the passage, which treats the coordination as having worked."]}
+];
+// A demo extra so the passage layout is visible before your own bank is loaded.
+const DEMO_EXTRAS = [
+{extras_id:"demo_rc1",type:"passage",title:"Railway time",
+ content:"Before the 1880s, most towns in North America kept their own local time, setting their clocks by the moment the sun stood highest overhead. The practice was perfectly serviceable for communities whose dealings rarely extended beyond a day's travel. It became untenable once the railways began knitting those communities into a single commercial network. A train crossing several hundred miles might pass through dozens of distinct local times, and the railway companies responded by publishing schedules based on the time kept at their own headquarters — a solution that multiplied the confusion rather than resolving it.\n\nThe standard time zones adopted in 1883 were therefore not imposed by governments but assembled by the railways themselves, whose operators simply agreed among one another to divide the continent into bands of uniform time. Municipal authorities were left to ratify a decision that had already been made. Some resisted: a number of cities went on maintaining their older local time alongside the new railway time for years afterward, and a few newspapers denounced the change as an arrogant interference with the natural order.\n\nHistorians have often treated this episode as a straightforward triumph of efficiency, but that reading understates what was surrendered. Local time had encoded a genuine relationship between a community and its own position on the earth. What replaced it was an abstraction — convenient, uniform, and indifferent to place. The railways did not merely coordinate their clocks; they established that the authority to define time could belong to a private commercial interest, a precedent whose implications reached well beyond scheduling."}
 ];
 // The public app ships only the demo questions above. Your real question bank is
 // uploaded at runtime (Load question bank) and stored in this browser only.
@@ -604,8 +621,11 @@ function loadQuestionBank(){
   const saved = load(LS.questions, null);
   if(saved && Array.isArray(saved) && saved.length){ setQuestions(saved,"uploaded"); }
   else { setQuestions(DEMO_QUESTIONS.slice(),"demo"); }
-  const ex = load(LS.extras, null);
-  setExtras(Array.isArray(ex) ? ex : []);
+  // In demo mode the demo extras are available so the passage layout shows;
+  // any uploaded extras are layered on top and win on id collision.
+  const savedExtras = load(LS.extras, null);
+  const base = questionSource==="demo" ? DEMO_EXTRAS : [];
+  setExtras([...base, ...(Array.isArray(savedExtras) ? savedExtras : [])]);
 }
 
 /* session runtime */
