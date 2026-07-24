@@ -1022,13 +1022,25 @@ function renderTablePart(p){
     ${foot}</div>`;
 }
 
+// Axis max with ~15% proportional headroom (room for the value label above the
+// tallest bar), rounded to 2 significant figures of the headroom target. Works
+// at any magnitude via log10 — the previous approach inferred the rounding step
+// from the digit-length of Math.floor(max), which broke for any max under 1
+// (it floors to 0, "0".length is 1, so every sub-1 chart got a step of 10 and
+// an axis topping out at 1 regardless of how small the real values were).
+function niceAxisMax(max){
+  if(!(max>0)) return 1;
+  const target=max*1.15;
+  const step=Math.pow(10, Math.floor(Math.log10(target))-1);
+  return +(Math.ceil(target/step)*step).toFixed(10);
+}
 // grouped bar chart — inline SVG, palette validated via the dataviz skill.
 // Value labels sit on every bar (data precision is "exact"), which also satisfies
 // the light-mode contrast relief requirement for the aqua series.
 function renderBarChart(p){
   const cats=Object.keys(p.data), series=p.series, cols=chartPalette();
   let max=0; cats.forEach(c=>series.forEach(s=>{const v=+p.data[c][s]||0; if(v>max)max=v;}));
-  const niceMax=Math.ceil(max/ (Math.pow(10,String(Math.floor(max)).length-1)||1)) * (Math.pow(10,String(Math.floor(max)).length-1)||1) || (max||1);
+  const niceMax=niceAxisMax(max);
   const W=460,H=250,padL=40,padR=10,padT=14,padB=46;
   const plotW=W-padL-padR, plotH=H-padT-padB;
   const gGap=18, groupW=(plotW-gGap*(cats.length-1))/cats.length;
